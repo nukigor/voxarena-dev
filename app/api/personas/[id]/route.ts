@@ -128,6 +128,12 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
       include: { taxonomies: { include: { taxonomy: true } } },
     });
 
+    console.log("[AvatarGen] env:", {
+      AVATAR_AI_ENABLED: process.env.AVATAR_AI_ENABLED,
+      OPENAI: !!process.env.OPENAI_API_KEY,
+    });
+    console.log("[AvatarGen] post-reload avatarUrl:", persona?.avatarUrl);
+
     // 4) Generate avatar if still missing, upload to R2, persist URL
     if (persona && !persona.avatarUrl) {
       console.log("[AvatarGen] starting for persona", persona.id, {
@@ -164,6 +170,8 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
           include: { taxonomies: { include: { taxonomy: true } } },
         });
       }
+    } else {
+      console.log("[AvatarGen] skipping: avatarUrl already set or persona missing");
     }
 
     return NextResponse.json(persona);

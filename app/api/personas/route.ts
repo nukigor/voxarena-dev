@@ -140,6 +140,12 @@ export async function POST(req: Request) {
       include: { taxonomies: { include: { taxonomy: true } } },
     });
 
+    console.log("[AvatarGen] env:", {
+      AVATAR_AI_ENABLED: process.env.AVATAR_AI_ENABLED,
+      OPENAI: !!process.env.OPENAI_API_KEY,
+    });
+    console.log("[AvatarGen] post-reload avatarUrl:", persona?.avatarUrl);
+
     if (persona && !persona.avatarUrl) {
       console.log("[AvatarGen] starting for persona", persona.id, {
         name: persona.name,
@@ -175,6 +181,8 @@ export async function POST(req: Request) {
           include: { taxonomies: { include: { taxonomy: true } } },
         });
       }
+    } else {
+      console.log("[AvatarGen] skipping: avatarUrl already set or persona missing");
     }
 
     return NextResponse.json(persona, { status: 201 });

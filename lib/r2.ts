@@ -1,4 +1,4 @@
-// frontend/lib/r2.ts
+// lib/r2.ts
 // Cloudflare R2 (S3-compatible) client + helper for uploading avatar images.
 
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
@@ -6,14 +6,32 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || ""; // e.g. abcdef1234567890
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || "";
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || "";
-const R2_BUCKET = process.env.R2_BUCKET || ""; // e.g. voxarena-avatars
-const R2_PUBLIC_BASE_URL = (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/+$/, ""); 
-// e.g. https://cdn.voxarena.ai/avatars OR https://<accountid>.r2.cloudflarestorage.com/<bucket>
+const R2_BUCKET = process.env.R2_BUCKET || ""; // e.g. voxarena or voxarena-avatars
 
+/**
+ * If R2_PUBLIC_BASE_URL is not set, fall back to the direct public endpoint:
+ *   https://<accountid>.r2.cloudflarestorage.com/<bucket>
+ * You can later swap this to a custom domain (e.g. https://cdn.voxarena.ai).
+ */
+const R2_PUBLIC_BASE_URL =
+  (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/+$/, "") ||
+  (R2_ACCOUNT_ID && R2_BUCKET
+    ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}`
+    : "");
+
+/** Validate minimum env for uploads. */
 function assertR2Env() {
-  if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET || !R2_PUBLIC_BASE_URL) {
+  const missing: string[] = [];
+  if (!R2_ACCOUNT_ID) missing.push("R2_ACCOUNT_ID");
+  if (!R2_ACCESS_KEY_ID) missing.push("R2_ACCESS_KEY_ID");
+  if (!R2_SECRET_ACCESS_KEY) missing.push("R2_SECRET_ACCESS_KEY");
+  if (!R2_BUCKET) missing.push("R2_BUCKET");
+  if (!R2_PUBLIC_BASE_URL) missing.push("R2_PUBLIC_BASE_URL (or allow default)");
+  if (missing.length) {
     throw new Error(
-      "Missing R2 config. Required: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET, R2_PUBLIC_BASE_URL"
+      `Missing R2 config: ${missing.join(
+        ", "
+      )}. Set in .env. (R2_PUBLIC_BASE_URL can be omitted; a default will be derived.)`
     );
   }
 }
@@ -27,14 +45,14 @@ export function getR2Client() {
       accessKeyId: R2_ACCESS_KEY_ID,
       secretAccessKey: R2_SECRET_ACCESS_KEY,
     },
-    forcePathStyle: true, // R2 generally prefers path-style
+    forcePathStyle: true, // R2 prefers path-style endpoints
   });
 }
 
 /**
  * Upload an avatar image buffer to R2 and return the public URL.
  * @param personaId string (used to key the object)
- * @param buffer PNG bytes
+ * @param buffer PNG/JPEG bytes
  * @param contentType default "image/png"
  * @returns public URL string
  */
@@ -47,20 +65,27 @@ export async function uploadAvatarBufferToR2(
   const s3 = getR2Client();
   const key = `avatars/${personaId}.png`;
 
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: key,
-      Body: buffer,
-      ContentType: contentType,
-    })
-  );
+  try {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: key,
+        Body: buffer,
+        ContentType: contentType,
+      })
+    );
+  } catch (err) {
+    console.error("[R2] PutObject failed:", err);
+    throw err;
+  }
 
-  // R2_PUBLIC_BASE_URL should resolve directly to the avatars "prefix" or bucket root.
+  // R2_PUBLIC_BASE_URL should resolve directly to the bucket or a CDN/cached domain.
   // Examples:
-  //   https://cdn.voxarena.ai            -> + /avatars/<id>.png
-  //   https://<acct>.r2.cloudflarestorage.com/<bucket> -> + /avatars/<id>.png
-  return `${R2_PUBLIC_BASE_URL}/${key}`;
+  //   Direct endpoint: https://<acct>.r2.cloudflarestorage.com/<bucket>
+  //   Custom domain:   https://cdn.voxarena.ai
+  // We always append /avatars/<id>.png
+  const base = R2_PUBLIC_BASE_URL.replace(/\/+$/, "");
+  return `${base}/avatars/${personaId}.png`;
 }
 
 /**
