@@ -165,12 +165,19 @@ export async function POST(req: Request) {
         console.error("[AvatarGen] extractAvatarUrl returned null");
       } else {
         try {
-          const r2Url = await uploadAvatarFromSourceToR2(persona.id, urlCandidate);
-          await prisma.persona.update({
-            where: { id: persona.id },
-            data: { avatarUrl: r2Url },
-          });
-          console.log("[AvatarGen] uploaded to R2:", r2Url);
+          // Fix: use .url from the returned object
+          const r2Result = await uploadAvatarFromSourceToR2(persona.id, urlCandidate);
+
+          // ✅ Update avatarUrl correctly
+          if (r2Result?.url) {
+            await prisma.persona.update({
+              where: { id: persona.id },
+              data: { avatarUrl: r2Result.url },
+            });
+            console.log("[AvatarGen] uploaded to R2:", r2Result.url);
+          } else {
+            console.warn("[AvatarGen] upload returned no URL object");
+          }
         } catch (e) {
           console.error("[AvatarGen] R2 upload failed:", e);
         }

@@ -24,7 +24,6 @@ function collectTaxonomyIds(payload: Record<string, any>): string[] {
     "metaphorIds",
     "debateHabitIds",
   ];
-
   for (const k of singularKeys) {
     const v = payload[k];
     if (typeof v === "string" && v.trim()) ids.push(v);
@@ -51,11 +50,9 @@ function parseQuirksFromText(quirksText: unknown): string[] | undefined {
 
 function sanitizePersonaScalarData(payload: Record<string, any>, isUpdate = true): Record<string, any> {
   const data: Record<string, any> = { ...payload };
-
   delete data.id;
   delete data.generateAvatar;
 
-  // quirksText -> quirks
   const quirks = parseQuirksFromText(data.quirksText);
   delete data.quirksText;
   if (quirks) data.quirks = isUpdate ? { set: quirks } : quirks;
@@ -115,7 +112,6 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
         },
       });
     } else if (Object.keys(body).some((k) => k.endsWith("Id") || k.endsWith("Ids"))) {
-      // explicit clear if UI sent the helper keys but empty
       await prisma.persona.update({
         where: { id: params.id },
         data: { taxonomies: { deleteMany: {} } },
@@ -128,13 +124,9 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
       include: { taxonomies: { include: { taxonomy: true } } },
     });
 
-    console.log("[AvatarGen] env:", {
-      AVATAR_AI_ENABLED: process.env.AVATAR_AI_ENABLED,
-      OPENAI: !!process.env.OPENAI_API_KEY,
-    });
     console.log("[AvatarGen] post-reload avatarUrl:", persona?.avatarUrl);
 
-    // 4) Generate avatar if still missing, upload to R2, persist URL
+    // 4) Generate avatar if still missing
     if (persona && !persona.avatarUrl) {
       console.log("[AvatarGen] starting for persona", persona.id, {
         name: persona.name,
@@ -154,12 +146,18 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
         console.error("[AvatarGen] extractAvatarUrl returned null");
       } else {
         try {
-          const r2Url = await uploadAvatarFromSourceToR2(persona.id, urlCandidate);
-          await prisma.persona.update({
-            where: { id: persona.id },
-            data: { avatarUrl: r2Url },
-          });
-          console.log("[AvatarGen] uploaded to R2:", r2Url);
+          const r2Result = await uploadAvatarFromSourceToR2(persona.id, urlCandidate);
+
+          // ✅ NEW: persist the uploaded URL to DB
+          if (r2Result?.url) {
+            await prisma.persona.update({
+              where: { id: persona.id },
+              data: { avatarUrl: r2Result.url },
+            });
+            console.log("[AvatarGen] avatarUrl saved:", r2Result.url);
+          } else {
+            console.warn("[AvatarGen] upload returned no URL for persona", persona.id);
+          }
         } catch (e) {
           console.error("[AvatarGen] R2 upload failed:", e);
         }

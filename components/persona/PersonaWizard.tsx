@@ -29,14 +29,17 @@ function getNormalizedName(raw: Record<string, any> | undefined) {
   return n;
 }
 
-// Normalize the payload before sending to API
+/**
+ * Build the payload from wizard state in the exact shape the API expects.
+ * NOTE: We purposely DO NOT include nested objects like `taxonomies`, dates, etc.
+ */
 function buildPayload(raw: Record<string, any>) {
   const name = getNormalizedName(raw);
 
-  return {
+  const payload: Record<string, any> = {
     ...raw,
 
-    // Ensure name is present in payload for Prisma (required field)
+    // Ensure name is present for Prisma (required)
     name,
 
     // Required sliders default to 5
@@ -49,9 +52,9 @@ function buildPayload(raw: Record<string, any>) {
     fillerPhraseIds: Array.isArray(raw.fillerPhraseIds) ? raw.fillerPhraseIds : [],
     metaphorIds: Array.isArray(raw.metaphorIds) ? raw.metaphorIds : [],
     debateHabitIds: Array.isArray(raw.debateHabitIds) ? raw.debateHabitIds : [],
-    cultureIds: Array.isArray(raw.cultureIds) ? raw.cultureIds : [],   // NEW <-- add this line
+    cultureIds: Array.isArray(raw.cultureIds) ? raw.cultureIds : [],
 
-    // Debate approach (multi from personaOptions)
+    // Debate approach (multi)
     debateApproach: Array.isArray(raw.debateApproach) ? raw.debateApproach : [],
 
     // Single-select taxonomy ids
@@ -61,7 +64,7 @@ function buildPayload(raw: Record<string, any>) {
     religionId: raw.religionId ?? null,
     universityId: raw.universityId ?? null,
     organizationId: raw.organizationId ?? null,
-    ageGroupId: raw.ageGroupId ?? null, // <-- NEW
+    ageGroupId: raw.ageGroupId ?? null,
 
     // Accent: taxonomy id + note (term)
     accentId: raw.accentId ?? null,
@@ -70,7 +73,7 @@ function buildPayload(raw: Record<string, any>) {
     // Free text
     quirksText: typeof raw.quirksText === "string" ? raw.quirksText : "",
 
-    // Identity & personality scalars (from personaOptions.ts)
+    // Identity & personality scalars
     ageGroup: raw.ageGroup ?? null,
     genderIdentity: raw.genderIdentity ?? null,
     pronouns: typeof raw.pronouns === "string" ? raw.pronouns : "",
@@ -81,6 +84,31 @@ function buildPayload(raw: Record<string, any>) {
     conflictStyle: raw.conflictStyle ?? null,
     tone: raw.tone ?? null,
   };
+
+  // Strip anything that would break Prisma update() on the server
+  delete payload.taxonomies;
+  delete payload.createdAt;
+  delete payload.updatedAt;
+
+  // Also strip any nested objects we might have dragged in
+  for (const k of Object.keys(payload)) {
+    const v = payload[k];
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      // keep only known scalar fields; nested objects should not be sent
+      // (we’re being conservative—server will attach taxonomies itself)
+      if (
+        k !== "avatarUrl" && // avatarUrl is allowed (string or null typically)
+        k !== "description" // description is string
+      ) {
+        // If it’s an unexpected object (e.g., taxonomy, prisma include), remove it
+        // Known nested fields are already mapped above into scalars/arrays
+        // e.g. identity: {...} shouldn’t be sent
+        delete payload[k];
+      }
+    }
+  }
+
+  return payload;
 }
 
 const STEP_DEFS = [
@@ -108,14 +136,9 @@ export default function PersonaWizard({
   const [showErrors, setShowErrors] = React.useState(false);
 
   // dialogs
-  const [confirmOpen, setConfirmOpen] = React.useState(false); // Save confirmation
-  const [cancelOpen, setCancelOpen] = React.useState(false);   // Cancel confirmation
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [cancelOpen, setCancelOpen] = React.useState(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
-
-  const steps = STEP_DEFS.map((s, idx) => ({
-    ...s,
-    status: idx < step ? "complete" : idx === step ? "current" : "upcoming",
-  }));
 
   // Prefill id on edit so PUT path is clear
   React.useEffect(() => {
@@ -126,6 +149,41 @@ export default function PersonaWizard({
       });
     }
   }, [mode, personaId, initialData]);
+
+  /**
+   * EDIT MODE: Fetch the latest persona (including avatarUrl) so the
+   * Identity step shows AI avatar immediately if present.
+   */
+  React.useEffect(() => {
+    let cancelled = false;
+
+    async function fetchPersona() {
+      if (mode !== "edit") return;
+      const effectiveId = (data?.id ?? personaId ?? initialData?.id) as string | undefined;
+      if (!effectiveId) return;
+
+      try {
+        const res = await fetch(`/api/personas/${encodeURIComponent(effectiveId)}`, {
+          headers: { "Accept": "application/json" },
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!cancelled && json) {
+          // Ensure we don’t keep nested/joined structures in client state that we’ll accidentally send back.
+          const next: WizardData = { ...json };
+          delete next.taxonomies;
+          setData((prev) => ({ ...prev, ...next, id: next.id || effectiveId }));
+        }
+      } catch {
+        // Non-fatal for editing UI
+      }
+    }
+
+    fetchPersona();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, personaId]);
 
   async function doSave() {
     try {
@@ -142,7 +200,8 @@ export default function PersonaWizard({
       }
 
       const payloadBase = buildPayload(data);
-      const effectiveId = payloadBase.id ?? data?.id ?? personaId ?? initialData?.id ?? undefined;
+      const effectiveId =
+        payloadBase.id ?? data?.id ?? personaId ?? initialData?.id ?? undefined;
       const isUpdate = mode === "edit" || Boolean(effectiveId);
       const payload = isUpdate ? { ...payloadBase, id: effectiveId } : payloadBase;
 
@@ -151,7 +210,7 @@ export default function PersonaWizard({
         : "/api/personas";
       const method = isUpdate ? "PUT" : "POST";
 
-      // ✅ Minimal addition: request AI avatar generation on save
+      // Ask server to generate/refresh avatar when saving (non-breaking if it already exists)
       const res = await fetch(url, {
         method,
         headers: { "Content-Type": "application/json" },
@@ -161,7 +220,15 @@ export default function PersonaWizard({
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Failed to save persona");
 
+      // Update local state so edit view immediately shows new avatarUrl if returned
+      if (json && typeof json === "object") {
+        const next: WizardData = { ...json };
+        delete next.taxonomies;
+        setData((prev) => ({ ...prev, ...next }));
+      }
+
       onSaved?.(json);
+      // Navigate back to list (unchanged behavior)
       router.push("/personas");
     } catch (e: any) {
       setSaveError(e?.message || "Failed to save persona");
@@ -171,6 +238,11 @@ export default function PersonaWizard({
       setConfirmOpen(false);
     }
   }
+
+  const steps = STEP_DEFS.map((s, idx) => ({
+    ...s,
+    status: idx < step ? "complete" : idx === step ? "current" : "upcoming",
+  }));
 
   const nameForDisable = getNormalizedName(data);
 
@@ -289,7 +361,9 @@ export default function PersonaWizard({
         {step === 0 && (
           <IdentityStep
             data={data ?? {}}
-            setData={(updater) => setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))}
+            setData={(updater) =>
+              setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))
+            }
             onValidityChange={setIsStepValid}
             showErrors={showErrors}
           />
@@ -298,7 +372,9 @@ export default function PersonaWizard({
         {step === 1 && (
           <EducationOrgStep
             data={data ?? {}}
-            setData={(updater) => setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))}
+            setData={(updater) =>
+              setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))
+            }
             onValidityChange={setIsStepValid}
             showErrors={showErrors}
           />
@@ -307,7 +383,9 @@ export default function PersonaWizard({
         {step === 2 && (
           <PersonaCultureBeliefsStep
             data={data ?? {}}
-            setData={(updater) => setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))}
+            setData={(updater) =>
+              setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))
+            }
             onValidityChange={setIsStepValid}
             showErrors={showErrors}
           />
@@ -316,7 +394,9 @@ export default function PersonaWizard({
         {step === 3 && (
           <DebateCommunicationStep
             data={data ?? {}}
-            setData={(updater) => setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))}
+            setData={(updater) =>
+              setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))
+            }
             onValidityChange={setIsStepValid}
             showErrors={showErrors}
           />
@@ -325,7 +405,9 @@ export default function PersonaWizard({
         {step === 4 && (
           <QuirksHabitsStep
             data={data ?? {}}
-            setData={(updater) => setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))}
+            setData={(updater) =>
+              setData((prev) => (typeof updater === "function" ? updater(prev ?? {}) : updater))
+            }
             onValidityChange={setIsStepValid}
             showErrors={showErrors}
           />
@@ -470,7 +552,7 @@ export default function PersonaWizard({
                     setCancelOpen(false);
                     router.push("/personas");
                   }}
-                  className="inline-flex w-full justify-center rounded-md bg-gray-900 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-gray-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-900 sm:col-start-2 dark:bg-white dark:text-gray-900 dark:shadow-none dark:hover:bg-gray-100"
+                  className="inline-flex w-full justify-center rounded-md bg-gray-900 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-gray-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-900 sm:col-start-2 dark:bg白 dark:text-gray-900 dark:shadow-none dark:hover:bg-gray-100"
                 >
                   Discard changes
                 </button>
